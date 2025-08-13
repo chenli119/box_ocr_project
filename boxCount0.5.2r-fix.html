@@ -1,0 +1,877 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Box OCR 0.5.2r2 — 旋转后重识别 & 代理默认 ?url=</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root{
+    --bg:#0b1020; --fg:#e7ecf5; --muted:#9fb0c8; --accent:#6aa4ff;
+    --ok:#35d07f; --hi:#ff4d4f; --warn:#ffd166; --line:#1b2744;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial; background:var(--bg); color:var(--fg);}
+  header{padding:12px 16px; border-bottom:1px solid var(--line);}
+  header .row{display:flex; gap:8px; flex-wrap:wrap; align-items:center;}
+  input[type=text], input[type=date], input[type=number], textarea{
+    background:#0f1730; color:var(--fg); border:1px solid #243458; border-radius:8px; padding:8px 10px; outline:none;
+  }
+  input::placeholder, textarea::placeholder{color:#6b7ba0;}
+  textarea{width:100%; min-height:120px; resize:vertical;}
+  button{background:var(--accent); color:#05132a; border:0; padding:8px 14px; border-radius:10px; font-weight:700; cursor:pointer;}
+  .btn{background:#132044; color:#cfe0ff; border:1px solid #243458;}
+  .btn:hover{background:#172956;}
+  .hint{color:var(--muted); font-size:12px; margin-left:6px;}
+  .pill{padding:4px 8px; border:1px solid #243458; border-radius:999px; font-size:12px; color:#cfe0ff; background:#101b36;}
+  .sep{height:10px;}
+  main{display:grid; grid-template-columns: 1fr 380px; min-height:calc(100vh - 340px);}
+  .left{border-right:1px solid var(--line); overflow:auto; display:flex; justify-content:center;}
+  .stage{position:relative; max-width:100%;}
+  /* 旋转：把 img+canvas 放进同一容器一起旋转，避免坐标系错位 */
+  .rotor{display:inline-block; transform-origin:center center;}
+  .rot0{transform:rotate(0deg);}
+  .rot90{transform:rotate(90deg);}
+  .rot180{transform:rotate(180deg);}
+  .rot270{transform:rotate(270deg);}
+  .stage img{display:block; max-width:100%; height:auto;}
+  .overlay{position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:auto;}
+  .right{padding:12px; overflow:auto;}
+  .panel-title{font-weight:700; margin:6px 0 10px; color:#cbd8f3;}
+  .topbar{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px;}
+  .list{display:flex; flex-direction:column; gap:6px;}
+  .item{display:flex; align-items:center; justify-content:space-between; background:#0f1730; border:1px solid #243458; border-radius:10px; padding:8px 10px; font-family:ui-monospace, Menlo, Consolas, monospace;}
+  .item.active{border-color:var(--hi); box-shadow:0 0 0 2px rgba(255,77,79,0.25) inset;}
+  .leftside{display:flex; align-items:center; gap:8px;}
+  .badge{font-size:12px; color:#0e2a18; background:var(--ok); border-radius:6px; padding:2px 6px;}
+  .score{color:var(--muted); font-size:12px;}
+  .editbox{width:180px;}
+  .controls{display:flex; gap:6px;}
+  .addbar{display:flex; gap:6px; margin-top:10px;}
+  #log{white-space:pre-wrap; font-family:ui-monospace,Menlo,Consolas,monospace; background:#0a1228; color:#d5e2ff; padding:10px 12px; height:260px; overflow:auto; margin:0;}
+  #stats{color:var(--muted); margin-top:6px; font-size:12px;}
+  .quota{display:inline-flex; align-items:center; gap:6px;}
+  .settings{background:#0f1730; border:1px solid #243458; border-radius:10px; padding:8px 10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;}
+  .spacer{flex:1;}
+  details{border:1px solid #243458; border-radius:10px; padding:8px 10px; background:#0f1730;}
+  summary{cursor:pointer; color:#cfe0ff;}
+</style>
+</head>
+<body>
+  <header>
+    <div class="row">
+      <label>日期(UTC)：<input id="day" type="date" /></label>
+      <button id="load">加载当天</button>
+      <button id="diagnose" class="btn">连接诊断</button>
+      <span class="hint">数据源：Genicsoft germanyoss · API 默认双斜杠（不改后端）</span>
+      <span class="spacer"></span>
+      <input id="appid" type="text" value="5051ce85dbd42733543c8eb1b4c00038" placeholder="x-ti-app-id" />
+      <input id="secret" type="text" value="866e28f3ebf0924b9d124ddc4324fd22" placeholder="x-ti-secret-code" />
+      <div class="quota">
+        <input id="quotaInit" type="number" min="0" value="1000" style="width:120px" title="初始额度(估算)" />
+        <span id="quotaText" class="pill">额度(估算)：—</span>
+      </div>
+    </div>
+
+    <div class="sep"></div>
+
+    <div class="row">
+      <div class="settings" style="flex:1">
+        <span>设置：</span>
+        <label>并发 <input id="cfgConcurrent" type="number" min="1" max="10" value="4" style="width:64px" /></label>
+        <label>预取+<input id="cfgPrefetch" type="number" min="0" max="20" value="4" style="width:64px" /></label>
+        <label>缓存窗口 前<input id="cfgKeepBack" type="number" min="0" max="20" value="2" style="width:64px" />/后<input id="cfgKeepAhead" type="number" min="0" max="50" value="8" style="width:64px" /></label>
+        <label><input id="cfgExportScore" type="checkbox" checked /> 导出score_avg</label>
+        <label><input id="cfgExportReq" type="checkbox" checked /> 导出x_request_id</label>
+        <label><input id="cfgExportTuid" type="checkbox" /> 导出tuid</label>
+      </div>
+      <div class="settings" style="min-width:520px">
+        <span>代理前缀：</span>
+        <!-- 改为你的 Worker（带 ?url=），可清空=直连 -->
+        <input id="proxyPrefix" type="text" style="min-width:360px"
+          value="https://broad-wave-2167.franklinzhang1985.workers.dev/?url="
+          placeholder="例如：https://xxx.workers.dev/?url=（留空直连）" />
+        <button id="testProxy" class="btn">测试代理</button>
+      </div>
+    </div>
+
+    <div class="sep"></div>
+
+    <details>
+      <summary>打不开接口？点我粘贴 JSON 兜底（把你能在浏览器直接打开的 JSON 粘进来）</summary>
+      <div class="row" style="margin-top:8px">
+        <textarea id="jsonPaste" placeholder='可粘贴完整返回 {"code":0,"data":{...}} 或仅 {"list":[...] } 或直接数组 [...]'></textarea>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="loadFromJSON" class="btn">从上面 JSON 载入当天</button>
+        <button id="pasteClipboard" class="btn">从剪贴板粘贴</button>
+        <span class="hint">照常支持 OCR 队列/复核/导出。</span>
+      </div>
+    </details>
+  </header>
+
+  <main>
+    <section class="left">
+      <div class="stage" id="stage">
+        <div id="rotor" class="rotor rot0">
+          <img id="preview" alt="preview" />
+          <canvas id="overlay" class="overlay"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <section class="right">
+      <div class="panel-title">当日相册</div>
+      <div class="topbar">
+        <button id="prev" class="btn">Prev</button>
+        <button id="next" class="btn">Next</button>
+        <span id="pos" class="pill">0 / 0</span>
+        <button id="export" class="btn">Export CSV</button>
+        <span id="ocrState" class="hint"></span>
+      </div>
+
+      <div class="topbar">
+        <button id="rotate90" class="btn">右转 90°（显示）</button>
+        <button id="reidentify" class="btn">Reidentify</button>
+        <span id="rotInfo" class="hint">朝向：0°（显示；Reidentify 时生效）</span>
+      </div>
+
+      <div class="panel-title">当前图片的包装箱编号</div>
+      <div class="topbar">
+        <label><input type="checkbox" id="charView"> 显示所选编号的字符级框</label>
+        <span class="hint" id="photoMeta"></span>
+      </div>
+
+      <div id="list" class="list"></div>
+
+      <div class="addbar">
+        <input id="addInput" type="text" class="editbox" placeholder="手动新增编号（未识别到）" />
+        <button id="addBtn" class="btn">Add</button>
+      </div>
+      <div id="stats"></div>
+    </section>
+  </main>
+
+  <footer>
+    <pre id="log"></pre>
+  </footer>
+
+<script>
+(function(){
+  const $ = s => document.querySelector(s);
+  const logBox = $('#log');
+  const img = $('#preview');
+  const canvas = $('#overlay'); const ctx = canvas.getContext('2d');
+  const stage = $('#stage');
+  const rotor = $('#rotor');
+
+  const API_BASE = 'http://boxtask.genicsoft.com//api/list/germanyoss';
+  const TEXTIN_URL = 'https://api.textin.com/ai/service/v2/recognize/multipage?straighten=1&character=1';
+
+  const cfg = { concurrent:4, prefetch:4, keepBack:2, keepAhead:8, exportScore:true, exportReq:true, exportTuid:false };
+  const state = {
+    dayEpochStart:null, dayEpochEnd:null,
+    pageCount:0, pageSize:100, total:0,
+    photos:[], currentIndex:0,
+    ocrCache:new Map(), inflight:0, pq:[],
+    charView:false, selectedCode:null,
+    quotaInit:1000, requestsSent:0,
+    rotation:0
+  };
+
+  function log(...args){ const line = args.map(v => typeof v==='string' ? v : JSON.stringify(v)).join(' '); logBox.textContent += line + '\n'; logBox.scrollTop = logBox.scrollHeight; }
+  function fmtUTC(epochSec){ if(epochSec==null) return ''; const d=new Date(epochSec*1000); return d.toISOString().replace('.000',''); }
+  function toEpochStartEndUTC(s){ const st = Date.parse(s+'T00:00:00Z')/1000|0; return {start:st, end:st+86399}; }
+  function clampInt(v,min,max){ v=Math.round(Number(v)||0); return Math.max(min,Math.min(max,v)); }
+  function getCSS(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+  function updateQuotaText(){ const remain=Math.max(0,state.quotaInit-state.requestsSent); $('#quotaText').textContent=`额度(估算)：剩 ${remain} 次`; }
+
+  // 代理拼接：支持 {url}、?url=、末尾 ? / =、以及直拼
+  function buildFetchURL(target){
+    const prefix = $('#proxyPrefix').value.trim();
+    if(!prefix) return target;
+    if(prefix.includes('{url}')) return prefix.replace('{url}', encodeURIComponent(target));
+    if(prefix.endsWith('?') || prefix.endsWith('=') || prefix.includes('?url=')) return prefix + encodeURIComponent(target);
+    return prefix + target;
+  }
+
+  // 初始日期 = 当前 UTC
+  (function initDate(){
+    const now = new Date();
+    const y = now.getUTCFullYear();
+    const m = String(now.getUTCMonth()+1).padStart(2,'0');
+    const d = String(now.getUTCDate()).padStart(2,'0');
+    $('#day').value = `${y}-${m}-${d}`;
+  })();
+
+  $('#cfgConcurrent').addEventListener('change', e=> cfg.concurrent = clampInt(e.target.value,1,10));
+  $('#cfgPrefetch').addEventListener('change', e=> cfg.prefetch = clampInt(e.target.value,0,20));
+  $('#cfgKeepBack').addEventListener('change', e=> cfg.keepBack = clampInt(e.target.value,0,20));
+  $('#cfgKeepAhead').addEventListener('change', e=> cfg.keepAhead = clampInt(e.target.value,0,50));
+  $('#cfgExportScore').addEventListener('change', e=> cfg.exportScore = e.target.checked);
+  $('#cfgExportReq').addEventListener('change', e=> cfg.exportReq = e.target.checked);
+  $('#cfgExportTuid').addEventListener('change', e=> cfg.exportTuid = e.target.checked);
+  $('#quotaInit').addEventListener('change', e=>{ state.quotaInit = clampInt(e.target.value,0,1e9); updateQuotaText(); });
+  $('#charView').addEventListener('change', e=>{ state.charView = e.target.checked; drawAll(); });
+
+  $('#prev').addEventListener('click', ()=> navigateTo(state.currentIndex-1));
+  $('#next').addEventListener('click', ()=> navigateTo(state.currentIndex+1));
+  $('#export').addEventListener('click', exportCSV);
+  $('#addBtn').addEventListener('click', manualAdd);
+  $('#load').addEventListener('click', loadDay);
+  $('#diagnose').addEventListener('click', diagnose);
+  $('#testProxy').addEventListener('click', testProxyFetch);
+  $('#loadFromJSON').addEventListener('click', loadFromPastedJSON);
+  $('#pasteClipboard').addEventListener('click', async ()=>{ try{ $('#jsonPaste').value = await navigator.clipboard.readText(); log('剪贴板已粘贴到文本框。'); }catch(e){ alert('无法读取剪贴板：'+e); } });
+
+  // 旋转 & 重识别
+  $('#rotate90').addEventListener('click', ()=> setRotation(state.rotation + 90));
+  $('#reidentify').addEventListener('click', ()=> reidentifyCurrent(true));
+
+  const roImg = new ResizeObserver(()=> drawAll());
+  const roStage = new ResizeObserver(()=> drawAll());
+  roImg.observe(img); roStage.observe(stage);
+  window.addEventListener('resize', ()=> drawAll());
+
+  // ------- Genicsoft API -------
+  async function fetchPage(page, pageSize){
+    const raw = `${API_BASE}/${page}/${pageSize}`;
+    const url = buildFetchURL(raw);
+    const modeInfo = (url===raw?'直连':'代理');
+    const t0 = performance.now();
+    let resp, data;
+    try{ resp = await fetch(url); }
+    catch(e){
+      log(`GET 失败(${modeInfo})：${String(e)}。可能为：CORS/混合内容/网络阻断。\n页面协议：${location.protocol}\n建议：1) 用 http 打开；2) 填写代理前缀；3) “粘贴 JSON”兜底。`);
+      throw e;
+    }
+    const t1 = performance.now();
+    if(!resp.ok){
+      const txt = await safeText(resp);
+      log(`GET 非200(${modeInfo})：HTTP ${resp.status} ${resp.statusText} body=${txt.slice(0,200)}`);
+      throw new Error(`HTTP ${resp.status}`);
+    }
+    try{ data = await resp.json(); }
+    catch(e){ log(`GET JSON解析失败(${modeInfo})：`, e); throw e; }
+    log(`GET list p=${page} size=${pageSize} (${modeInfo}) → code=${data.code} time=${(t1-t0).toFixed(0)}ms`);
+    if(data.code !== 0) throw new Error(`list code=${data.code} ${data.msg||''}`);
+    return data.data;
+  }
+  async function safeText(resp){ try{ return await resp.text(); }catch{ return ''; } }
+
+  async function loadDay(){
+    logBox.textContent = '';
+    resetAlbumState();
+
+    const dayStr = $('#day').value;
+    if(!dayStr){ alert('请选择日期'); return; }
+    const { start, end } = toEpochStartEndUTC(dayStr);
+    state.dayEpochStart = start; state.dayEpochEnd = end;
+    log(`Day: ${dayStr} (UTC) → [${start}, ${end}]`);
+
+    let meta;
+    try{ meta = await fetchPage(1, state.pageSize); }
+    catch(e){ alert('加载列表失败（第一页）。可设置代理或用“粘贴 JSON”。详见底部日志。'); return; }
+    state.total = meta.total; state.pageCount = meta.page_count; state.pageSize = meta.page_size || state.pageSize;
+    log(`Total=${state.total}, pageCount=${state.pageCount}, pageSize=${state.pageSize}`);
+    if(state.total === 0){ alert('当日无照片'); return; }
+
+    // 二分找起始页
+    let lo=1, hi=state.pageCount, firstPage=null, firstList=null;
+    while(lo<=hi){
+      const mid = Math.floor((lo+hi)/2);
+      let pageData;
+      try{ pageData = await fetchPage(mid, state.pageSize); }
+      catch(e){ alert('分页请求失败（可能 CORS）。尝试代理或粘贴 JSON。'); return; }
+      const arr = pageData.list || []; if(!arr.length){ lo = mid+1; continue; }
+      const first = arr[0].uptime, last = arr[arr.length-1].uptime;
+      if(last < start) lo = mid + 1;
+      else if(first >= start){ firstPage = mid; firstList = arr; hi = mid - 1; }
+      else { firstPage = mid; firstList = arr; break; }
+    }
+    if(!firstPage){ log('未找到起始页'); alert('该日期无照片'); return; }
+    if(!firstList){ const d = await fetchPage(firstPage, state.pageSize); firstList = d.list || []; }
+
+    let firstIdx = firstList.findIndex(x=> x.uptime >= start);
+    if(firstIdx === -1){ firstIdx = 0; firstPage += 1; if(firstPage>state.pageCount){ alert('该日期无照片'); return; } }
+
+    // 收集当天
+    const collected = []; let page = firstPage, idxInPage = firstIdx;
+    while(page<=state.pageCount){
+      const data = (page===firstPage)? {list:firstList} : await fetchPage(page, state.pageSize);
+      const arr = data.list || [];
+      for(let i=idxInPage;i<arr.length;i++){
+        const r = arr[i]; if(r.uptime > end){ page = state.pageCount+1; break; }
+        if(r.uptime >= start){ collected.push({id:r.id,tuid:r.tuid,url:r.url,uptime:r.uptime}); }
+      }
+      idxInPage = 0; page++;
+    }
+    if(!collected.length){ alert('该日期无照片'); return; }
+
+    collected.sort((a,b)=> a.uptime - b.uptime);
+    state.photos = collected; state.currentIndex = 0;
+
+    log(`当日命中：${state.photos.length} 张，首=${state.photos[0].id} @ ${fmtUTC(state.photos[0].uptime)}，末=${state.photos.at(-1).id} @ ${fmtUTC(state.photos.at(-1).uptime)}`);
+
+    await showCurrent();
+    warmupQueue();
+  }
+
+  // 粘贴 JSON 兜底
+  function parsePasted(jsonText){
+    let obj; try{ obj = JSON.parse(jsonText); }catch(e){ throw new Error('JSON 解析失败'); }
+    let list = null;
+    if(Array.isArray(obj)) list = obj;
+    else if(obj && Array.isArray(obj.list)) list = obj.list;
+    else if(obj && obj.data && Array.isArray(obj.data.list)) list = obj.data.list;
+    if(!Array.isArray(list)) throw new Error('未找到 list 数组');
+    return list.map(x=>({ id:x.id, tuid:x.tuid, url:x.url, uptime:x.uptime }));
+  }
+  async function loadFromPastedJSON(){
+    logBox.textContent = '';
+    resetAlbumState();
+    const dayStr = $('#day').value; if(!dayStr){ alert('请选择日期'); return; }
+    const { start, end } = toEpochStartEndUTC(dayStr);
+    state.dayEpochStart=start; state.dayEpochEnd=end;
+    log(`(粘贴) Day: ${dayStr} (UTC) → [${start}, ${end}]`);
+    const txt = $('#jsonPaste').value.trim(); if(!txt){ alert('请先粘贴 JSON'); return; }
+    let list; try{ list = parsePasted(txt); }catch(e){ alert('解析失败：'+e.message); return; }
+    const collected = list.filter(r => r && typeof r.uptime==='number' && r.uptime>=start && r.uptime<=end);
+    if(!collected.length){ alert('该日期在粘贴的 JSON 中没有命中记录'); return; }
+    collected.sort((a,b)=> a.uptime - b.uptime);
+    state.photos = collected; state.currentIndex = 0;
+    log(`(粘贴) 当日命中：${state.photos.length} 张，首=${state.photos[0].id}，末=${state.photos.at(-1).id}`);
+    await showCurrent(); warmupQueue();
+  }
+
+  // 诊断/测试
+  async function diagnose(){
+    log('—— 连接诊断 ——');
+    log('页面地址：', location.href);
+    log('页面协议：', location.protocol, '（file:// 或 https:// 打开前端，直连 http 接口常被拦截）');
+    const testUrl = `${API_BASE}/1/5`; log('直连测试URL：', testUrl);
+    try{
+      const resp = await fetch(testUrl);
+      log('直连响应：ok=', resp.ok, 'status=', resp.status);
+      if(!resp.ok){ const t = await safeText(resp); log('直连响应体（前200）：', t.slice(0,200)); }
+      else{ log('直连看起来可达（但若无 CORS 头，脚本仍无法读数据）'); }
+    }catch(e){
+      log('直连 fetch 抛错：', String(e), ' → 多为 CORS/混合内容/网络阻断。');
+      log('建议：1) 用 http:// 打开本页面；2) 填好上方代理；3) 使用“粘贴 JSON”。');
+    }
+    log('—— 诊断结束 ——');
+  }
+  async function testProxyFetch(){
+    const prefix = $('#proxyPrefix').value.trim(); if(!prefix){ alert('请先输入代理前缀'); return; }
+    const target = `${API_BASE}/1/5`; const url = buildFetchURL(target);
+    log('代理前缀：', prefix); log('代理拼接后URL：', url);
+    try{
+      const resp = await fetch(url);
+      log('代理响应：ok=', resp.ok, 'status=', resp.status);
+      const txt = await resp.text(); log('代理返回前200：', txt.slice(0,200));
+    }catch(e){ log('代理 fetch 抛错：', String(e)); }
+  }
+
+  // ------- Image/Canvas & 绘制 -------
+  function getDisplayRect(){ return img.getBoundingClientRect(); }
+  function getPageDimsForDisplay(){
+    // 90/270° 时，OCR 坐标的 w/h 与显示宽高交换
+    const w = currentPageMeta.width||img.naturalWidth||1;
+    const h = currentPageMeta.height||img.naturalHeight||1;
+    return (state.rotation % 180 === 0) ? {w,h} : {w:h, h:w};
+  }
+  function resizeCanvasToImage(){
+    const rect = getDisplayRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.style.width = rect.width + 'px';
+    canvas.style.height = rect.height + 'px';
+    const needW = Math.max(1, Math.round(rect.width * dpr));
+    const needH = Math.max(1, Math.round(rect.height * dpr));
+    if(canvas.width!==needW || canvas.height!==needH){ canvas.width=needW; canvas.height=needH; }
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    ctx.clearRect(0,0,rect.width,rect.height);
+  }
+  function scalePoint(x,y, pageW, pageH){
+    const rect = getDisplayRect();
+    const sx = rect.width/(pageW||1);
+    const sy = rect.height/(pageH||1);
+    return [x*sx,y*sy];
+  }
+  function drawQuad(poly, color, fill, lw, glow){
+    const dims = getPageDimsForDisplay();
+    const pts = [
+      scalePoint(poly[0],poly[1], dims.w, dims.h),
+      scalePoint(poly[2],poly[3], dims.w, dims.h),
+      scalePoint(poly[4],poly[5], dims.w, dims.h),
+      scalePoint(poly[6],poly[7], dims.w, dims.h),
+    ];
+    ctx.beginPath(); ctx.moveTo(pts[0][0],pts[0][1]);
+    for(let i=1;i<4;i++) ctx.lineTo(pts[i][0],pts[i][1]); ctx.closePath();
+    if(fill){ ctx.fillStyle = fill; ctx.fill(); }
+    ctx.save();
+    ctx.lineWidth = lw||2;
+    ctx.strokeStyle = color || getCSS('--ok');
+    ctx.shadowColor = glow ? 'rgba(255,0,0,0.55)' : 'transparent';
+    ctx.shadowBlur = glow ? 8 : 0;
+    ctx.stroke();
+    ctx.restore();
+    return pts;
+  }
+  function pointInPoly(px,py,pts){ ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for(let i=1;i<4;i++) ctx.lineTo(pts[i][0], pts[i][1]); ctx.closePath(); return ctx.isPointInPath(px,py); }
+
+  let currentPageMeta = {width:0,height:0,angle:0};
+
+  function drawAll(){
+    resizeCanvasToImage();
+    const photo = state.photos[state.currentIndex]; if(!photo) return;
+    const res = state.ocrCache.get(photo.url); if(!res || res.status!=='ok') return;
+
+    let total=0, hi=0, chars=0;
+    for(const occ of res._occurrences || []){
+      if(!occ.bbox) continue;
+      const isHi = (state.selectedCode && occ.boxID===state.selectedCode);
+      drawQuad(
+        occ.bbox,
+        isHi ? getCSS('--hi') : getCSS('--ok'),
+        isHi ? 'rgba(255,77,79,0.12)' : 'rgba(53,208,127,0.06)',
+        isHi ? 5 : 2,
+        isHi
+      );
+      total++; if(isHi) hi++;
+      if(isHi && state.charView && Array.isArray(occ.chars)){
+        for(const ch of occ.chars){
+          if(!ch.poly) continue;
+          const low = (typeof ch.score==='number') ? (ch.score<0.90) : false;
+          drawQuad(
+            ch.poly,
+            low ? getCSS('--hi') : getCSS('--warn'),
+            low ? 'rgba(255,77,79,0.10)' : 'rgba(255,209,102,0.06)',
+            low ? 3 : 2,
+            low
+          );
+          chars++;
+        }
+      }
+    }
+    const rect = getDisplayRect();
+    log(`Draw: 总框 ${total}${state.selectedCode?`；高亮 ${hi}(${state.selectedCode})`:''}${state.charView?`；字符框 ${chars}`:''} | rect=${rect.width.toFixed(1)}x${rect.height.toFixed(1)} DPR=${(window.devicePixelRatio||1).toFixed(2)} · 朝向=${state.rotation}°（显示）`);
+  }
+
+  canvas.addEventListener('click', onCanvasClick);
+  function onCanvasClick(ev){
+    const rect = canvas.getBoundingClientRect();
+    const x = ev.clientX - rect.left;
+    const y = ev.clientY - rect.top;
+    const photo = state.photos[state.currentIndex]; if(!photo) return;
+    const res = state.ocrCache.get(photo.url); if(!res || res.status!=='ok') return;
+
+    const dims = getPageDimsForDisplay();
+    for(const occ of res._occurrences || []){
+      if(!occ.bbox) continue;
+      const pts = [
+        scalePoint(occ.bbox[0],occ.bbox[1], dims.w, dims.h),
+        scalePoint(occ.bbox[2],occ.bbox[3], dims.w, dims.h),
+        scalePoint(occ.bbox[4],occ.bbox[5], dims.w, dims.h),
+        scalePoint(occ.bbox[6],occ.bbox[7], dims.w, dims.h),
+      ];
+      if(pointInPoly(x,y,pts)){
+        state.selectedCode = occ.boxID;
+        renderList(); drawAll();
+        const node = [...document.querySelectorAll('.item')].find(n=>n.dataset.code===occ.boxID);
+        if(node) node.scrollIntoView({block:'nearest'});
+        log('Reverse select:', occ.boxID);
+        return;
+      }
+    }
+  }
+
+  // ------- OCR -------
+  async function ocrUrl(photo, forceUseRotation=false){
+    const appid = $('#appid').value.trim();
+    const secret = $('#secret').value.trim();
+    if(!appid || !secret) throw new Error('缺少 AppID/Secret');
+    state.requestsSent++; updateQuotaText();
+
+    const useBlob = !!(forceUseRotation && (state.rotation % 360 !== 0));
+    const t0 = performance.now();
+    let resp, text, data, modeNote='';
+
+    if(useBlob){
+      const blob = await fetchRotatedBlob(photo.url, state.rotation);
+      modeNote = `image-blob(rot=${state.rotation})`;
+      resp = await fetch(TEXTIN_URL, {
+        method:'POST',
+        headers:{ 'x-ti-app-id':appid, 'x-ti-secret-code':secret, 'Content-Type':'application/octet-stream' },
+        body: blob
+      });
+      text = await resp.text();
+    }else{
+      modeNote = `text-url(rot=0)`;
+      resp = await fetch(TEXTIN_URL, {
+        method:'POST',
+        headers:{ 'x-ti-app-id':appid, 'x-ti-secret-code':secret, 'Content-Type':'text/plain' },
+        body: photo.url
+      });
+      text = await resp.text();
+    }
+
+    const t1 = performance.now();
+    try{ data = JSON.parse(text); }catch{ throw new Error('JSON 解析失败：'+text.slice(0,200)); }
+    if(data.code !== 200) throw new Error(`API ${data.code} ${data.message||''}`);
+
+    const pages = (data.result && data.result.pages) || [];
+    const p0 = pages[0] || {};
+    currentPageMeta = { width:p0.width||0, height:p0.height||0, angle:p0.angle||0 };
+
+    const lines = p0.lines || [];
+    const occ = extractItemsCharwise(lines);
+    const uniq = buildUniqueFromOccurrences(occ);
+
+    const res = {
+      status:'ok',
+      xRequestId: data.x_request_id || '',
+      durationMs: data.duration || (t1-t0),
+      mode: modeNote,
+      items: uniq.map(u=>({ boxID:u.boxID, originalID:u.originalID, bbox:u.bbox, scoreAvg:u.scoreAvg })),
+      _occurrences: occ
+    };
+    log(`OCR ok: id=${photo.id} ${modeNote} x_request_id=${res.xRequestId||'—'} duration=${res.durationMs|0}ms`);
+    return res;
+  }
+
+  // 通过代理抓图片 → 旋转 → 输出 Blob（JPEG）
+  async function fetchRotatedBlob(url, deg){
+    // 1) 代理抓原图为 Blob（避免跨域污染）
+    const imgResp = await fetch(buildFetchURL(url));
+    if(!imgResp.ok) throw new Error(`抓图失败 HTTP ${imgResp.status}`);
+    const srcBlob = await imgResp.blob();
+
+    // 2) 用 ImageBitmap（若不可用则 HTMLImageElement）绘制到离屏 canvas
+    const bmp = ('createImageBitmap' in window)
+      ? await createImageBitmap(srcBlob)
+      : await new Promise((resolve,reject)=>{
+          const o = URL.createObjectURL(srcBlob);
+          const im = new Image(); im.onload=()=>{ URL.revokeObjectURL(o); resolve(im); };
+          im.onerror=e=>{ URL.revokeObjectURL(o); reject(e); };
+          im.src=o;
+        });
+
+    const w = bmp.width, h = bmp.height;
+    const rad = (deg%360) * Math.PI/180;
+    const rot90 = (deg%180 !== 0);
+    const tw = rot90 ? h : w;
+    const th = rot90 ? w : h;
+
+    const off = document.createElement('canvas');
+    off.width = tw; off.height = th;
+    const cx = off.getContext('2d');
+    cx.translate(tw/2, th/2);
+    cx.rotate(rad);
+    cx.drawImage(bmp, -w/2, -h/2);
+    return await new Promise((resolve)=> off.toBlob(resolve, 'image/jpeg', 0.92));
+  }
+
+  function extractItemsCharwise(lines){
+    const out = [];
+    for(const L of lines){
+      const textRaw = (L.text||''); const text = textRaw.toUpperCase();
+      const chars = Array.from(text);
+      const N = Math.min(
+        chars.length,
+        Array.isArray(L.char_positions)? L.char_positions.length : 0,
+        Array.isArray(L.char_scores)? L.char_scores.length : Infinity
+      );
+      if(N===0){
+        const reGrab = /[A-Z]{4}[A-Z0-9 ]{2,}/g;
+        const ms = text.match(reGrab)||[];
+        for(const m of ms){
+          const cleaned = m.replace(/\s+/g,'');
+          if(/^[A-Z]{4}[A-Z0-9]{2,}$/.test(cleaned) && cleaned.length>=8){
+            out.push({ boxID:cleaned, originalID:cleaned, bbox:Array.isArray(L.position)? L.position.slice(0,8):null, score:typeof L.score==='number'?L.score:null, chars:[] });
+          }
+        }
+        continue;
+      }
+      const reGrabIdx = /[A-Z]{4}[A-Z0-9 ]{2,}/g;
+      let m; while((m=reGrabIdx.exec(text))){
+        const s=m.index, e=s+m[0].length;
+        const ss=Math.max(0,Math.min(N,s)), ee=Math.max(0,Math.min(N,e));
+        const polys=[], chArr=[]; let sum=0, cnt=0;
+        for(let i=ss;i<ee;i++){
+          const poly=L.char_positions[i]; if(!poly || poly.length<8) continue;
+          const ch=chars[i]; const sc=Array.isArray(L.char_scores)? L.char_scores[i] : null;
+          polys.push(poly); chArr.push({ch,poly,score:sc});
+          if(sc!=null){ sum+=sc; cnt++; }
+        }
+        if(!polys.length) continue;
+        const rawSeg = chars.slice(ss,ee).join('');
+        const cleaned = rawSeg.replace(/\s+/g,'').toUpperCase();
+        if(!(/^[A-Z]{4}[A-Z0-9]{2,}$/.test(cleaned) && cleaned.length>=8)) continue;
+        const rect = unionRect(polys);
+        const avg = cnt ? (sum/cnt) : (typeof L.score==='number' ? L.score : null);
+        out.push({ boxID:cleaned, originalID:cleaned, bbox:rect, score:avg, chars:chArr });
+      }
+    }
+    return out;
+  }
+  function unionRect(polys){
+    let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+    for(const p of polys){ const xs=[p[0],p[2],p[4],p[6]], ys=[p[1],p[3],p[5],p[7]]; minX=Math.min(minX,...xs); minY=Math.min(minY,...ys); maxX=Math.max(maxX,...xs); maxY=Math.max(maxY,...ys); }
+    if(!isFinite(minX)) return null;
+    return [minX,minY, maxX,minY, maxX,maxY, minX,maxY];
+  }
+  function buildUniqueFromOccurrences(occ){
+    const map=new Map();
+    for(const o of occ){
+      const key=o.boxID;
+      const ent = map.get(key) || {count:0,sum:0,scCnt:0,bbox:o.bbox,originalID:o.originalID};
+      ent.count++; if(o.score!=null){ ent.sum+=o.score; ent.scCnt++; }
+      if(o.bbox && ent.bbox){ ent.bbox = unionRect([ent.bbox, o.bbox]); }
+      else if(o.bbox && !ent.bbox){ ent.bbox = o.bbox; }
+      map.set(key, ent);
+    }
+    const arr=[];
+    for(const [boxID,ent] of map.entries()){
+      arr.push({ boxID, originalID:ent.originalID, scoreAvg: ent.scCnt? ent.sum/ent.scCnt : null, count:ent.count, bbox:ent.bbox });
+    }
+    arr.sort((a,b)=> (occ.findIndex(x=>x.boxID===a.boxID)) - (occ.findIndex(x=>x.boxID===b.boxID)));
+    return arr;
+  }
+
+  // ------- 队列/内存 -------
+  function warmupQueue(){ scheduleAround(state.currentIndex); pumpQueue(); }
+  function scheduleAround(idx){
+    const want = new Set();
+    for(let i=idx; i<Math.min(state.photos.length, idx+1+cfg.prefetch); i++) want.add(i);
+    for(const i of want){
+      const p = state.photos[i]; if(!p) continue;
+      const res = state.ocrCache.get(p.url);
+      if(!res || res.status==='error'){
+        if(!state.pq.includes(i)) state.pq.push(i);
+      }
+    }
+  }
+  function pumpQueue(){
+    while(state.inflight < cfg.concurrent && state.pq.length){
+      const i = state.pq.shift();
+      const p = state.photos[i]; if(!p) continue;
+      const exist = state.ocrCache.get(p.url);
+      if(exist && exist.status==='ok') continue;
+
+      state.inflight++;
+      state.ocrCache.set(p.url, {status:'pending', items:[], _occurrences:[]});
+      updateOcrState();
+
+      // 队列里的预取仍使用 URL 模式（不改变 0.5.1 行为）
+      ocrUrl(p, /*forceUseRotation*/false).then(res=>{
+        state.ocrCache.set(p.url, res);
+        if(i === state.currentIndex){ renderList(); drawAll(); updatePosMeta(); }
+      }).catch(err=>{
+        state.ocrCache.set(p.url, {status:'error', errorMsg:String(err), items:[], _occurrences:[]});
+        log('OCR 失败：', p.id, p.url, String(err));
+      }).finally(()=>{
+        state.inflight--; updateOcrState(); trimCache(); pumpQueue();
+      });
+    }
+  }
+  function trimCache(){
+    const lb = Math.max(0, state.currentIndex - cfg.keepBack);
+    const rb = Math.min(state.photos.length-1, state.currentIndex + cfg.keepAhead);
+    for(const [url,val] of state.ocrCache.entries()){
+      const idx = state.photos.findIndex(x=>x.url===url);
+      if(idx===-1){ state.ocrCache.delete(url); continue; }
+      if(idx<lb || idx>rb){
+        if(val && val.status==='ok'){
+          state.ocrCache.set(url, { status:'ok', xRequestId:val.xRequestId, durationMs:val.durationMs, items:val.items, _occurrences:[] });
+        }else{
+          state.ocrCache.delete(url);
+        }
+      }
+    }
+  }
+  function updateOcrState(){ $('#ocrState').textContent = `并发 ${state.inflight}/${cfg.concurrent} · 队列 ${state.pq.length}`; }
+
+  // ------- 导航/渲染 -------
+  async function navigateTo(n){
+    if(n<0 || n>=state.photos.length) return;
+    state.currentIndex = n;
+    await showCurrent();
+    scheduleAround(state.currentIndex);
+    pumpQueue();
+  }
+  async function showCurrent(){
+    const p = state.photos[state.currentIndex]; if(!p) return;
+    $('#pos').textContent = `${state.currentIndex+1} / ${state.photos.length}`;
+    $('#photoMeta').textContent = `photo_id=${p.id} · ${fmtUTC(p.uptime)}`;
+
+    img.src = p.url;
+    try{ await img.decode(); }catch{}
+    resizeCanvasToImage();
+
+    if(!state.ocrCache.get(p.url)){ state.pq.unshift(state.currentIndex); pumpQueue(); }
+    else{ renderList(); drawAll(); }
+  }
+  function renderList(){
+    const el = $('#list'); el.innerHTML='';
+    const p = state.photos[state.currentIndex]; if(!p) return;
+    const res = state.ocrCache.get(p.url);
+    const stats = $('#stats');
+
+    if(!res || res.status==='pending'){ el.innerHTML = '<div class="item"><span>识别中…</span></div>'; stats.textContent = `HTTP: — | 服务耗时: — | 往返: —`; return; }
+    if(res.status==='error'){ el.innerHTML = `<div class="item"><span>识别失败：${res.errorMsg||'未知错误'}</span><span class="score"></span></div>`; stats.textContent = `HTTP: — | 服务耗时: — | 往返: —`; return; }
+
+    const unique = buildUniqueFromOccurrences(res._occurrences||[]);
+    res.items = unique.map(u=>({ boxID:u.boxID, originalID:u.originalID, bbox:u.bbox, scoreAvg:u.scoreAvg }));
+
+    for(const it of unique){
+      const row = document.createElement('div');
+      row.className = 'item' + (state.selectedCode===it.boxID?' active':'');
+      row.dataset.code = it.boxID;
+
+      const left = document.createElement('div'); left.className='leftside';
+      const codeSpan = document.createElement('span'); codeSpan.textContent = it.boxID;
+      const edit = document.createElement('input'); edit.className='editbox'; edit.type='text'; edit.value=it.boxID; edit.style.display='none';
+      const badge = document.createElement('span'); badge.className='badge'; badge.textContent=`x${it.count}`;
+      left.appendChild(codeSpan); left.appendChild(edit); left.appendChild(badge);
+
+      const right = document.createElement('div'); right.className='controls';
+      const score = document.createElement('span'); score.className='score'; score.textContent=(it.scoreAvg!=null)?`score ${(it.scoreAvg).toFixed(3)}`:'';
+      const btnEdit = document.createElement('button'); btnEdit.className='btn'; btnEdit.textContent='Edit';
+      const btnSave = document.createElement('button'); btnSave.className='btn'; btnSave.textContent='Save'; btnSave.style.display='none';
+      right.appendChild(score); right.appendChild(btnEdit); right.appendChild(btnSave);
+
+      row.appendChild(left); row.appendChild(right); el.appendChild(row);
+
+      row.addEventListener('click', (e)=>{
+        if(e.target===btnEdit || e.target===btnSave || e.target===edit) return;
+        state.selectedCode = it.boxID;
+        drawAll(); renderList(); row.scrollIntoView({block:'nearest'});
+      });
+
+      btnEdit.addEventListener('click', ()=>{
+        codeSpan.style.display='none'; edit.style.display='inline-block'; edit.focus();
+        btnEdit.style.display='none'; btnSave.style.display='inline-block';
+      });
+      function commit(){
+        const oldCode = it.boxID;
+        const newCode = edit.value.trim().toUpperCase().replace(/\s+/g,'');
+        if(!/^[A-Z]{4}[A-Z0-9]{2,}$/.test(newCode)){ alert('格式不合法'); return; }
+        if(newCode===oldCode){
+          codeSpan.style.display=''; edit.style.display='none'; btnEdit.style.display='inline-block'; btnSave.style.display='none'; return;
+        }
+        log(`Edit: ${oldCode} -> ${newCode}`);
+        const res = state.ocrCache.get(state.photos[state.currentIndex].url);
+        for(const u of (res._occurrences||[])){ if(u.boxID===oldCode) u.boxID = newCode; }
+        state.selectedCode = newCode;
+        renderList(); drawAll();
+      }
+      btnSave.addEventListener('click', commit);
+      edit.addEventListener('keydown', e=>{ if(e.key==='Enter') commit(); });
+      edit.addEventListener('blur', ()=>{ if(btnSave.style.display!=='none') commit(); });
+    }
+    $('#stats').innerHTML = `唯一编号 <b>${unique.length}</b> 个；总框 <b>${res._occurrences?.length||0}</b> 个 | x_request_id: ${res.xRequestId||'—'} | 耗时: ${res.durationMs!=null? res.durationMs+'ms':'—'}${res.mode? ' | '+res.mode:''}`;
+  }
+
+  // 手动新增/导出
+  function manualAdd(){
+    const v = $('#addInput').value.trim().toUpperCase().replace(/\s+/g,'');
+    if(!v) return;
+    if(!/^[A-Z]{4}[A-Z0-9]{2,}$/.test(v)){ alert('格式不合法'); return; }
+    const p = state.photos[state.currentIndex]; if(!p) return;
+    const res = state.ocrCache.get(p.url);
+    if(!res || res.status!=='ok'){ alert('当前图片尚未识别完成'); return; }
+    const exists = (res._occurrences||[]).some(o=>o.boxID===v);
+    if(exists){ alert('该编号已存在'); return; }
+    (res._occurrences ||= []).push({ boxID:v, originalID:'', bbox:null, score:null, chars:[] });
+    state.selectedCode = v; $('#addInput').value = '';
+    renderList(); drawAll(); log('Manual Add:', v);
+  }
+  function exportCSV(){
+    if(!state.photos.length){ alert('无数据'); return; }
+    const rows = [];
+    const header = ['photo_id','url','uptime_utc','boxID','originalID'];
+    if(cfg.exportScore) header.push('score_avg');
+    if(cfg.exportReq) header.push('x_request_id');
+    if(cfg.exportTuid) header.push('tuid');
+    rows.push(header.join(','));
+    for(const p of state.photos){
+      const res = state.ocrCache.get(p.url);
+      if(!res || res.status!=='ok') continue;
+      const uniques = buildUniqueFromOccurrences(res._occurrences||[]);
+      for(const u of uniques){
+        const line = [
+          csvCell(p.id), csvCell(p.url), csvCell(fmtUTC(p.uptime)),
+          csvCell(u.boxID), csvCell(u.originalID||'')
+        ];
+        if(cfg.exportScore) line.push(csvCell(u.scoreAvg!=null? u.scoreAvg.toFixed(3):''));
+        if(cfg.exportReq) line.push(csvCell(res.xRequestId||'')); 
+        if(cfg.exportTuid) line.push(csvCell(p.tuid||''));
+        rows.push(line.join(','));
+      }
+    }
+    const csv = rows.join('\n');
+    const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+    const a = document.createElement('a');
+    const dayStr = $('#day').value || 'day';
+    a.href = URL.createObjectURL(blob); a.download = `box_ids_${dayStr}.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    log(`Export: ${rows.length-1} 行已导出`);
+  }
+  function csvCell(v){ if(v==null) return ''; const s=String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s; }
+
+  // 重置/导航元数据
+  function resetAlbumState(){
+    state.photos=[]; state.currentIndex=0;
+    $('#pos').textContent='0 / 0'; $('#photoMeta').textContent='';
+    $('#list').innerHTML=''; $('#stats').textContent='';
+    img.src=''; resizeCanvasToImage();
+    state.ocrCache.clear(); state.pq.length=0; state.inflight=0;
+    state.selectedCode=null;
+    setRotation(0, /*silent*/true);
+  }
+  function updatePosMeta(){
+    const p = state.photos[state.currentIndex]; if(!p) return;
+    $('#pos').textContent = `${state.currentIndex+1} / ${state.photos.length}`;
+    $('#photoMeta').textContent = `photo_id=${p.id} · ${fmtUTC(p.uptime)}`;
+  }
+
+  // 旋转 & Reidentify
+  function setRotation(deg, silent){
+    state.rotation = ((deg%360)+360)%360;
+    rotor.classList.remove('rot0','rot90','rot180','rot270');
+    rotor.classList.add('rot'+state.rotation);
+    $('#rotInfo').textContent = `朝向：${state.rotation}°（显示；Reidentify 时生效）`;
+    if(!silent){
+      log(`Rotate: ${state.rotation}°（仅显示层旋转；如需让 OCR 感知，请点 Reidentify）`);
+      drawAll();
+    }
+  }
+  function reidentifyCurrent(useRotation){
+    const p = state.photos[state.currentIndex]; if(!p) return;
+    state.ocrCache.delete(p.url);
+    $('#list').innerHTML=''; resizeCanvasToImage();
+    // 直接同步重新识别当前（优先），其余仍走队列
+    state.inflight++;
+    updateOcrState();
+    ocrUrl(p, !!useRotation).then(res=>{
+      state.ocrCache.set(p.url, res);
+      renderList(); drawAll(); updatePosMeta();
+    }).catch(err=>{
+      state.ocrCache.set(p.url, {status:'error', errorMsg:String(err), items:[], _occurrences:[]});
+      log('OCR 失败：', p.id, p.url, String(err));
+    }).finally(()=>{ state.inflight--; updateOcrState(); pumpQueue(); });
+  }
+
+  // 键盘导航
+  window.addEventListener('keydown', (e)=>{
+    if(e.target && (e.target.tagName==='INPUT' || e.target.tagName==='TEXTAREA')) return;
+    if(e.key==='ArrowRight') navigateTo(state.currentIndex+1);
+    else if(e.key==='ArrowLeft') navigateTo(state.currentIndex-1);
+  });
+
+  updateQuotaText();
+  log('0.5.2r2 就绪：默认代理为 ?url=；Reidentify 在旋转后会上传“旋转后的位图”到 OCR。');
+
+})();
+</script>
+</body>
+</html>
